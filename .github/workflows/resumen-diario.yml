@@ -1,0 +1,111 @@
+name: Resumen diario
+
+# Cada mañana (12:00 UTC = 7:00 en Colombia):
+# 1. Certificado SSL: cuántos días le quedan. Con menos de 15 abre un aviso
+#    («certificado»); se cierra solo cuando se renueva. Si vence, los clientes
+#    ven «sitio no seguro» y la app deja de conectar.
+# 2. Resumen de las últimas 24 h: cuántas revisiones de vigilancia y recorridos
+#    salieron bien o mal y qué avisos siguen abiertos. Va en un Issue con la
+#    etiqueta «resumen» (llega por correo); el del día anterior se cierra.
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+concurrency:
+  group: resumen-diario
+  cancel-in-progress: false
+
+env:
+  SITE_HOST: fastfoodportobello.duckdns.org
+  MIN_DIAS_CERTIFICADO: "15"
+
+jobs:
+  resumir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Certificado SSL
+        id: ssl
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          vence=""
+          for intento in 1 2 3; do
+            vence=$(echo | timeout 20 openssl s_client -servername "$SITE_HOST" -connect "$SITE_HOST:443" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || true)
+            [ -n "$vence" ] && break
+            sleep 15
+          done
+          if [ -z "$vence" ]; then
+            dias="?"
+            estado="No se pudo leer el certificado (¿el sitio no responde por HTTPS?)."
+          else
+            dias=$(( ( $(date -d "$vence" +%s) - $(date +%s) ) / 86400 ))
+            estado="Vence el $(date -d "$vence" +'%Y-%m-%d') (faltan ${dias} días)."
+          fi
+          echo "dias=${dias}" >> "$GITHUB_OUTPUT"
+          echo "estado=${estado}" >> "$GITHUB_OUTPUT"
+          echo "### Certificado SSL de ${SITE_HOST}" >> "$GITHUB_STEP_SUMMARY"
+          echo "${estado}" >> "$GITHUB_STEP_SUMMARY"
+          gh label create certificado --color FBCA04 --description "El certificado SSL está por vencer" -R "$GITHUB_REPOSITORY" 2>/dev/null || true
+          abierto=$(gh issue list -R "$GITHUB_REPOSITORY" --label certificado --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ "$dias" = "?" ] || [ "$dias" -lt "$MIN_DIAS_CERTIFICADO" ]; then
+            cuerpo=$(printf "%s\n\nEl servidor renueva solo (Caddy/Let's Encrypt). Si esto sigue abierto, revisar en el VPS los registros del proxy." "$estado")
+            if [ -n "$abierto" ]; then
+              gh issue comment "$abierto" -R "$GITHUB_REPOSITORY" --body "$cuerpo"
+            else
+              gh issue create -R "$GITHUB_REPOSITORY" --label certificado --title "Certificado SSL por vencer: ${SITE_HOST}" --body "$cuerpo"
+            fi
+          elif [ -n "$abierto" ]; then
+            gh issue close "$abierto" -R "$GITHUB_REPOSITORY" --comment "Renovado. ${estado}"
+          fi
+
+      - name: Resumen de las últimas 24 horas
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SSL_ESTADO: ${{ steps.ssl.outputs.estado }}
+        run: |
+          set -u
+          desde=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          contar() {
+            # contar <workflow.yml> → "bien mal"
+            gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/workflows/$1/runs" -f created=">=${desde}" -f per_page=100 \
+              --jq '[.workflow_runs[] | select(.status=="completed")] | "\([.[] | select(.conclusion=="success")] | length) \([.[] | select(.conclusion=="failure")] | length)"' 2>/dev/null || echo "? ?"
+          }
+          read -r vig_bien vig_mal <<< "$(contar vigilancia.yml)"
+          read -r rec_bien rec_mal <<< "$(contar recorrido.yml)"
+          avisos=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --json number,title,labels --jq '[.[] | select([.labels[].name] | any(. == "caido" or . == "recorrido" or . == "certificado"))] | map("- #\(.number) \(.title)") | join("\n")' 2>/dev/null || true)
+          [ -z "$avisos" ] && avisos="Ninguno."
+          if [ "$vig_mal" = "0" ] && [ "$rec_mal" = "0" ] && [ "$avisos" = "Ninguno." ]; then
+            titular="Todo bien"
+          else
+            titular="Hubo fallas"
+          fi
+          hoy=$(TZ=America/Bogota date +'%Y-%m-%d')
+          cuerpo=$(cat <<EOF
+          **${titular}** en las últimas 24 horas.
+
+          | Revisión | Bien | Con falla |
+          |---|---|---|
+          | Vigilancia (cada 5 min: app, base, tareas, tiendas) | ${vig_bien} | ${vig_mal} |
+          | Recorrido de la tienda (cada hora, en un teléfono) | ${rec_bien} | ${rec_mal} |
+
+          **Certificado SSL:** ${SSL_ESTADO}
+
+          **Avisos abiertos:**
+          ${avisos}
+          EOF
+          )
+          cuerpo=$(printf "%s" "$cuerpo" | sed 's/^          //')
+          printf "%s\n" "$cuerpo" >> "$GITHUB_STEP_SUMMARY"
+          gh label create resumen --color 0E8A16 --description "Resumen diario de la vigilancia" -R "$GITHUB_REPOSITORY" 2>/dev/null || true
+          for n in $(gh issue list -R "$GITHUB_REPOSITORY" --label resumen --state open --json number --jq '.[].number' 2>/dev/null); do
+            gh issue close "$n" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || true
+          done
+          gh issue create -R "$GITHUB_REPOSITORY" --label resumen --title "Resumen ${hoy}: ${titular}" --body "$cuerpo"

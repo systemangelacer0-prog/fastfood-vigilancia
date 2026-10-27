@@ -1,0 +1,96 @@
+name: Recorrido de la tienda
+
+# Cada hora, un teléfono simulado recorre la tienda de cada negocio como un
+# cliente: portada → menú → abre un plato. Solo MIRA (nunca carrito, perfil ni
+# pago): no crea clientes ni pedidos. Ver recorrido/recorrido.mjs.
+#
+# Complementa a vigilancia.yml (que solo pregunta «¿responde?»): esto ve si la
+# tienda de verdad FUNCIONA en el navegador (errores de JavaScript, menú sin
+# platos, ficha que no abre o se queda cargando, respuestas 5xx).
+#
+# Si falla: corrida en rojo + aviso en Issues con la etiqueta «recorrido»
+# (comenta mientras siga fallando y se cierra solo cuando vuelve).
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: recorrido
+  cancel-in-progress: false
+
+env:
+  SITE_URL: https://fastfoodportobello.duckdns.org
+  PLAYWRIGHT_VERSION: 1.62.1
+
+jobs:
+  recorrer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Traer el código
+        run: |
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          git fetch -q --depth 1 origin "${GITHUB_SHA}"
+          git checkout -q FETCH_HEAD
+
+      # El navegador se guarda entre corridas (no se descarga cada hora).
+      - name: Navegador en caché
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ env.PLAYWRIGHT_VERSION }}
+
+      - name: Instalar Playwright
+        run: |
+          npm init -y >/dev/null
+          npm install --no-save --no-audit --no-fund "playwright@${PLAYWRIGHT_VERSION}"
+          npx playwright install --with-deps chromium
+
+      - name: Recorrer cada tienda
+        id: recorrer
+        env:
+          HEALTH_CHECK_SECRET: ${{ secrets.HEALTH_CHECK_SECRET }}
+        run: |
+          set -u
+          tiendas="portobello-pizza"
+          if [ -n "${HEALTH_CHECK_SECRET}" ]; then
+            lista=$(curl -s --max-time 20 -H "Authorization: Bearer ${HEALTH_CHECK_SECRET}" "${SITE_URL}/api/health/stores" | jq -r '.stores[]?' 2>/dev/null | grep -E '^[a-z0-9-]{1,63}$' | head -n 50 || true)
+            [ -n "$lista" ] && tiendas="$lista"
+          fi
+          # Un reintento completo antes de alarmar (un parpadeo de red no es caída).
+          if ! node recorrido/recorrido.mjs $tiendas; then
+            echo "Primer intento falló; reintento en 60 s."
+            sleep 60
+            node recorrido/recorrido.mjs $tiendas
+          fi
+
+      - name: Abrir o actualizar el aviso
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          fallas=$(cat recorrido-salida/fallas.txt 2>/dev/null || echo "- No se pudo completar el recorrido (ver la corrida).")
+          gh label create recorrido --color D93F0B --description "La tienda no funciona en el navegador" -R "$GITHUB_REPOSITORY" 2>/dev/null || true
+          abierto=$(gh issue list -R "$GITHUB_REPOSITORY" --label recorrido --state open --json number --jq '.[0].number')
+          cuerpo=$(printf "Falló a las %s UTC:\n\n%s\n\nCorrida: %s/%s/actions/runs/%s" "$(date -u +'%H:%M')" "$fallas" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
+          if [ -n "$abierto" ]; then
+            gh issue comment "$abierto" -R "$GITHUB_REPOSITORY" --body "$cuerpo"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --label recorrido --title "La tienda falla en el navegador ($(date -u +'%Y-%m-%d %H:%M UTC'))" --body "$cuerpo"
+          fi
+
+      - name: Cerrar el aviso si ya volvió
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          abierto=$(gh issue list -R "$GITHUB_REPOSITORY" --label recorrido --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$abierto" ]; then
+            gh issue close "$abierto" -R "$GITHUB_REPOSITORY" --comment "La tienda volvió a funcionar a las $(date -u +'%H:%M') UTC."
+          fi
