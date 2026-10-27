@@ -47,10 +47,13 @@ jobs:
             local nombre="$1" ruta="$2" header="${3:-}" codigo="000" tiempo="0"
             for intento in 1 2 3; do
               if [ -n "$header" ]; then
-                read -r codigo tiempo < <(curl -s -o /dev/null -w "%{http_code} %{time_total}" --max-time 20 -H "$header" "${SITE_URL}${ruta}" || echo "000 0")
+                read -r codigo tiempo < <(curl -s -o /dev/null -w "%{http_code} %{time_total}
+" --max-time 20 -H "$header" "${SITE_URL}${ruta}" || true)
               else
-                read -r codigo tiempo < <(curl -s -o /dev/null -w "%{http_code} %{time_total}" --max-time 20 "${SITE_URL}${ruta}" || echo "000 0")
+                read -r codigo tiempo < <(curl -s -o /dev/null -w "%{http_code} %{time_total}
+" --max-time 20 "${SITE_URL}${ruta}" || true)
               fi
+              codigo="${codigo:-000}"
               [ "$codigo" = "200" ] && break
               [ "$intento" -lt 3 ] && sleep 20
             done
