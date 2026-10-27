@@ -32,7 +32,7 @@ env:
 jobs:
   revisar:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Revisar la app
         id: revisar
@@ -57,15 +57,31 @@ jobs:
               [ "$codigo" = "200" ] && break
               [ "$intento" -lt 3 ] && sleep 20
             done
+            # 404 en una revisión «nueva» = la app aún no tiene esa ruta
+            # desplegada: se anota y no se alarma.
+            if [ "$codigo" = "404" ] && [ "${4:-}" = "nueva" ]; then
+              resumen="${resumen}| ${nombre} | sin desplegar | - |"$'\n'
+              return 0
+            fi
             resumen="${resumen}| ${nombre} | ${codigo} | ${tiempo} s |"$'\n'
             if [ "$codigo" != "200" ]; then fallas="${fallas}- ${nombre}: respondió ${codigo} tras 3 intentos"$'\n'; fi
           }
           revisar "App viva" "/api/health/live"
           revisar "Base de datos alcanzable" "/api/health/ready"
-          revisar "Tienda de Portobello" "/r/portobello-pizza"
+          # Tareas programadas del trabajador del VPS (impagos, recordatorios,
+          # zonas de domicilio, CRM, limpieza, centinela, buzón de WhatsApp).
+          revisar "Tareas programadas" "/api/health/cron" "" "nueva"
+          # La tienda de CADA negocio activo (la lista exige la clave: es la
+          # cartera de clientes). Sin la clave, solo Portobello.
+          tiendas="portobello-pizza"
           if [ -n "${HEALTH_CHECK_SECRET}" ]; then
             revisar "WhatsApp por negocio" "/api/health/waha" "Authorization: Bearer ${HEALTH_CHECK_SECRET}"
+            lista=$(curl -s --max-time 20 -H "Authorization: Bearer ${HEALTH_CHECK_SECRET}" "${SITE_URL}/api/health/stores" | jq -r '.stores[]?' 2>/dev/null | grep -E '^[a-z0-9-]{1,63}$' | head -n 200 || true)
+            [ -n "$lista" ] && tiendas="$lista"
           fi
+          for slug in $tiendas; do
+            revisar "Tienda ${slug}" "/r/${slug}"
+          done
           {
             echo "### Vigilancia $(date -u +'%Y-%m-%d %H:%M UTC')"
             echo "| Revisión | Código | Tiempo |"
