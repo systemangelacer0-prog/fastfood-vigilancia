@@ -1,0 +1,21 @@
+name: Mantener activa la vigilancia
+
+# GitHub apaga los workflows programados de un repo público tras 60 días sin
+# actividad. Cada semana este vuelve a activar la vigilancia (sin commits, sin ruido).
+on:
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  actions: write
+
+jobs:
+  activar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Reactivar la vigilancia
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/vigilancia.yml/enable"
