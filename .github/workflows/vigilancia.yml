@@ -46,12 +46,12 @@ jobs:
           revisar() {
             local nombre="$1" ruta="$2" header="${3:-}" codigo="000" tiempo="0"
             for intento in 1 2 3; do
+              # «|| true» en el read: sin red curl no imprime nada y read
+              # devolvería error (el shell corre con -e).
               if [ -n "$header" ]; then
-                read -r codigo tiempo < <(curl -s -o /dev/null -w "%{http_code} %{time_total}
-" --max-time 20 -H "$header" "${SITE_URL}${ruta}" || true)
+                read -r codigo tiempo < <(curl -s -o /dev/null -w '%{http_code} %{time_total}\n' --max-time 20 -H "$header" "${SITE_URL}${ruta}" || true) || true
               else
-                read -r codigo tiempo < <(curl -s -o /dev/null -w "%{http_code} %{time_total}
-" --max-time 20 "${SITE_URL}${ruta}" || true)
+                read -r codigo tiempo < <(curl -s -o /dev/null -w '%{http_code} %{time_total}\n' --max-time 20 "${SITE_URL}${ruta}" || true) || true
               fi
               codigo="${codigo:-000}"
               [ "$codigo" = "200" ] && break
